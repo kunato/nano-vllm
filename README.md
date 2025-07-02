@@ -7,6 +7,14 @@ A lightweight vLLM implementation built from scratch.
 * 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
 * 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
 * ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
+* 🤖 **Multi-model Support** - Supports both Qwen3 and Llama model architectures
+
+## Supported Models
+
+* **Qwen3**: All Qwen3 model variants
+* **Llama**: Llama 1/2/3, Code Llama, and other Llama-based models
+
+See `LLAMA_SUPPORT.md` for detailed information about Llama implementation.
 
 ## Installation
 
@@ -25,12 +33,24 @@ huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
 
 ## Quick Start
 
-See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
+See `example.py` for Qwen3 usage and `test_llama.py` for Llama testing. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
+
+### Qwen3 Models
 ```python
 from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
+llm = LLM("/path/to/qwen3/model", enforce_eager=True, tensor_parallel_size=1)
 sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
 prompts = ["Hello, Nano-vLLM."]
+outputs = llm.generate(prompts, sampling_params)
+outputs[0]["text"]
+```
+
+### Llama Models
+```python
+from nanovllm import LLM, SamplingParams
+llm = LLM("/path/to/llama/model", enforce_eager=True, tensor_parallel_size=1)
+sampling_params = SamplingParams(temperature=0.7, max_tokens=100)
+prompts = ["The capital of France is"]
 outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
 ```

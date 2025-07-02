@@ -3,13 +3,78 @@ import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
+import os
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models.llama import LlamaForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+
+
+class NanoVLLMModelConfig:
+    """Helper class that implements vLLM's ModelConfig methods for cache calculation."""
+    
+    def __init__(self, hf_config, tensor_parallel_size=1):
+        self.hf_config = hf_config
+        self.tensor_parallel_size = tensor_parallel_size
+    
+    def get_head_size(self) -> int:
+        """Get head size following exact vLLM implementation."""
+        # NOTE: Some configs may set head_dim=None in the config
+        if getattr(self.hf_config, "head_dim", None) is not None:
+            return self.hf_config.head_dim
+
+        # FIXME(woosuk): This may not be true for all models.
+        return (self.hf_config.hidden_size //
+                self.hf_config.num_attention_heads)
+    
+    def get_total_num_kv_heads(self) -> int:
+        """Returns the total number of KV heads following exact vLLM implementation."""
+        # Check all possible attribute names for KV heads
+        attributes = [
+            # For Falcon:
+            "n_head_kv",
+            "num_kv_heads", 
+            # For LLaMA-2:
+            "num_key_value_heads",
+            # For ChatGLM:
+            "multi_query_group_num",
+        ]
+        for attr in attributes:
+            num_kv_heads = getattr(self.hf_config, attr, None)
+            if num_kv_heads is not None:
+                return num_kv_heads
+
+        # For non-grouped-query attention models, the number of KV heads is
+        # equal to the number of attention heads.
+        return self.hf_config.num_attention_heads
+    
+    def get_num_kv_heads(self) -> int:
+        """Returns the number of KV heads per GPU following exact vLLM implementation."""
+        total_num_kv_heads = self.get_total_num_kv_heads()
+        # If tensor parallelism is used, we divide the number of KV heads by
+        # the tensor parallel size. We will replicate the KV heads in the
+        # case where the number of KV heads is smaller than the tensor
+        # parallel size so each GPU has at least one KV head.
+        return max(1, total_num_kv_heads // self.tensor_parallel_size)
+    
+    def get_num_attention_layers(self) -> int:
+        """Get number of attention layers."""
+        return getattr(self.hf_config, "num_hidden_layers", 0)
+    
+    @staticmethod
+    def get_cache_block_size(block_size: int, num_kv_heads: int, head_size: int, 
+                           num_attention_layers: int, dtype: torch.dtype) -> int:
+        """Calculate cache block size following exact vLLM implementation."""
+        key_cache_entry = num_kv_heads * head_size
+        value_cache_entry = key_cache_entry  # For most models
+        total = num_attention_layers * block_size * (key_cache_entry + value_cache_entry)
+        
+        dtype_size = dtype.itemsize
+        return dtype_size * total
 
 
 class ModelRunner:
@@ -28,7 +93,16 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        
+        # Dynamically select model based on architecture
+        if hf_config.model_type == "qwen3":
+            self.model = Qwen3ForCausalLM(hf_config)
+        elif hf_config.model_type == "llama":
+            self.model = LlamaForCausalLM(hf_config)
+        else:
+            raise ValueError(f"Unsupported model type: {hf_config.model_type}. "
+                           "Supported types: qwen3, llama")
+        
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
@@ -98,23 +172,64 @@ class ModelRunner:
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
+        """Allocate KV cache following exact vLLM implementation."""
         config = self.config
         hf_config = config.hf_config
+        
+        # Create vLLM-compatible model config helper
+        model_config = NanoVLLMModelConfig(hf_config, self.world_size)
+        
+        # Get cache parameters using vLLM methods
+        head_size = model_config.get_head_size()
+        num_kv_heads = model_config.get_num_kv_heads() 
+        num_attention_layers = model_config.get_num_attention_layers()
+        
+        # Calculate block size using exact vLLM formula
+        block_bytes = NanoVLLMModelConfig.get_cache_block_size(
+            self.block_size, num_kv_heads, head_size, 
+            num_attention_layers, hf_config.torch_dtype
+        )
+        
+        # Memory calculation similar to vLLM
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
-        self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, hf_config.head_dim)
+        
+        # Available memory for KV cache
+        available_memory = int(total * config.gpu_memory_utilization - used - peak + current)
+        
+        # Calculate number of blocks
+        config.num_kvcache_blocks = available_memory // block_bytes
+        
+        # Ensure we have at least some blocks
+        if config.num_kvcache_blocks <= 0:
+            # If memory calculation fails, use a minimum sensible value
+            min_blocks = 64  # At least 64 blocks for basic functionality
+            config.num_kvcache_blocks = min_blocks
+            print(f"Warning: KV cache memory calculation failed. Using minimum {min_blocks} blocks.")
+            print(f"Available memory: {available_memory}, Block bytes: {block_bytes}")
+            print(f"Head size: {head_size}, Num KV heads: {num_kv_heads}, Num layers: {num_attention_layers}")
+        
+        assert config.num_kvcache_blocks > 0, f"num_kvcache_blocks must be > 0, got {config.num_kvcache_blocks}"
+        
+        # Allocate cache tensor with correct dimensions
+        self.kv_cache = torch.zeros(
+            2, num_attention_layers, config.num_kvcache_blocks, 
+            self.block_size, num_kv_heads, head_size,
+            dtype=hf_config.torch_dtype, device="cuda"
+        )
+        
+        # Assign cache to model layers
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+        
+        print(f"Allocated KV cache: {config.num_kvcache_blocks} blocks, "
+              f"{head_size} head_size, {num_kv_heads} kv_heads, {num_attention_layers} layers")
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
