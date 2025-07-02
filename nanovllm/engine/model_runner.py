@@ -301,10 +301,42 @@ class ModelRunner:
 
     def prepare_sample(self, seqs: list[Sequence]):
         temperatures = []
+        repetition_penalties = []
+        top_ps = []
+        prompt_tokens = []
+        output_tokens = []
+        
+        # Get vocab size from config
+        vocab_size = self.config.hf_config.vocab_size
+        
+        # Find max lengths for padding
+        max_prompt_len = max(len(seq.prompt_token_ids) for seq in seqs) if seqs else 0
+        max_output_len = max(len(seq.completion_token_ids) for seq in seqs) if seqs else 0
+        
         for seq in seqs:
             temperatures.append(seq.temperature)
+            repetition_penalties.append(seq.repetition_penalty)
+            top_ps.append(seq.top_p)
+            
+            # Pad prompt tokens with vocab_size (following vllm convention)
+            prompt = list(seq.prompt_token_ids)
+            prompt += [vocab_size] * (max_prompt_len - len(prompt))
+            prompt_tokens.append(prompt)
+            
+            # Pad output tokens with vocab_size
+            output = list(seq.completion_token_ids)  
+            output += [vocab_size] * (max_output_len - len(output))
+            output_tokens.append(output)
+        
+        # Convert to tensors
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        return temperatures
+        repetition_penalties = torch.tensor(repetition_penalties, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        top_ps = torch.tensor(top_ps, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        
+        prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True) if max_prompt_len > 0 else None
+        output_tokens = torch.tensor(output_tokens, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True) if max_output_len > 0 else None
+        
+        return temperatures, repetition_penalties, top_ps, prompt_tokens, output_tokens
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
@@ -328,9 +360,22 @@ class ModelRunner:
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        sampling_tensors = self.prepare_sample(seqs) if self.rank == 0 else (None, None, None, None, None)
         logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        
+        if self.rank == 0:
+            temperatures, repetition_penalties, top_ps, prompt_tokens, output_tokens = sampling_tensors
+            token_ids = self.sampler(
+                logits, 
+                temperatures,
+                repetition_penalties=repetition_penalties,
+                top_ps=top_ps,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens
+            ).tolist()
+        else:
+            token_ids = None
+        
         reset_context()
         return token_ids
 

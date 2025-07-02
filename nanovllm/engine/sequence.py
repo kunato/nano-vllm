@@ -1,6 +1,7 @@
 from copy import copy
 from enum import Enum, auto
 from itertools import count
+from typing import Optional
 
 from nanovllm.sampling_params import SamplingParams
 
@@ -27,6 +28,10 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.repetition_penalty = sampling_params.repetition_penalty
+        self.top_p = sampling_params.top_p
+        self.stop = sampling_params.stop
+        self.stop_token_ids = sampling_params.stop_token_ids
 
     def __len__(self):
         return self.num_tokens
@@ -70,6 +75,39 @@ class Sequence:
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
+
+    def should_stop(self, eos_token_id: Optional[int] = None) -> bool:
+        """Check if sequence should stop based on stop conditions."""
+        # Check if max tokens reached
+        if self.num_completion_tokens >= self.max_tokens:
+            return True
+        
+        # Check stop token IDs
+        if self.stop_token_ids and self.last_token in self.stop_token_ids:
+            return True
+        
+        # Check EOS token (unless ignore_eos is True)
+        if not self.ignore_eos and eos_token_id is not None and self.last_token == eos_token_id:
+            return True
+        
+        return False
+
+    def check_stop_strings(self, tokenizer) -> bool:
+        """Check if the generated text contains any stop strings."""
+        if not self.stop:
+            return False
+        
+        # Decode the completion tokens to check for stop strings
+        try:
+            completion_text = tokenizer.decode(self.completion_token_ids, skip_special_tokens=True)
+            for stop_str in self.stop:
+                if stop_str in completion_text:
+                    return True
+        except Exception:
+            # If decoding fails, don't stop
+            pass
+        
+        return False
 
     def __getstate__(self):
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,

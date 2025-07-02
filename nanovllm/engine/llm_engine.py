@@ -31,6 +31,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        self.scheduler.tokenizer = self.tokenizer  # Pass tokenizer for stop string checking
         atexit.register(self.exit)
 
     def exit(self):
