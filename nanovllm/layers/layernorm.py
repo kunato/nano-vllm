@@ -1,8 +1,14 @@
 import torch
 from torch import nn
+from typing import Optional, Union
 
 
 class RMSNorm(nn.Module):
+    """Root mean square normalization following exact vLLM implementation.
+
+    Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
+    Refer to https://arxiv.org/abs/1910.07467
+    """
 
     def __init__(
         self,
@@ -11,41 +17,71 @@ class RMSNorm(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        self.eps = eps
+        self.variance_epsilon = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
+        self._is_compiled = False
 
-    @torch.compile
-    def rms_forward(
-        self,
+    @staticmethod
+    def forward_static(
+        weight: torch.Tensor,
+        variance_epsilon: float,
         x: torch.Tensor,
-    ) -> torch.Tensor:
+        residual: Optional[torch.Tensor],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Static forward implementation that can be compiled safely."""
         orig_dtype = x.dtype
         x = x.to(torch.float32)
-        var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
-        return x
+        if residual is not None:
+            x = x + residual.to(torch.float32)
+            residual = x.to(orig_dtype)
 
-    @torch.compile
-    def add_rms_forward(
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        x = x.to(orig_dtype) * weight
+        
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
+    def forward_native(
         self,
         x: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32).add_(residual.to(torch.float32))
-        residual = x.to(orig_dtype)
-        var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
-        return x, residual
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """PyTorch-native implementation equivalent to forward()."""
+        return self.forward_static(self.weight.data, self.variance_epsilon, x, residual)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """CUDA implementation with conditional compilation."""
+        # Apply torch.compile conditionally like vLLM's GemmaRMSNorm
+        if torch.compiler.is_compiling():
+            return self.forward_native(x, residual)
+
+        # Compile the static method only once
+        if not self._is_compiled:
+            self.forward_static = torch.compile(self.forward_static)
+            self._is_compiled = True
+        
+        return self.forward_native(x, residual)
 
     def forward(
         self,
         x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            return self.rms_forward(x)
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Main forward method that dispatches to appropriate implementation."""
+        # For nano-vllm, we'll use CUDA implementation when available
+        if torch.cuda.is_available() and x.is_cuda:
+            return self.forward_cuda(x, residual)
         else:
-            return self.add_rms_forward(x, residual)
+            return self.forward_native(x, residual)
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.weight.data.size(0)}"
+        s += f", eps={self.variance_epsilon}"
+        return s
