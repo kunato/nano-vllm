@@ -1,278 +1,132 @@
 # 📚 Complete Guide: Adding New Model Support to nano-vLLM
 
-Based on the successful implementation of Llama support in nano-vLLM, this guide provides a comprehensive step-by-step process for adding any new model architecture to the nano-vLLM inference engine.
+Based on successful implementations of Llama and Qwen2 support in nano-vLLM, this guide provides a step-by-step process for adding any new model architecture to the nano-vLLM inference engine.
 
 ## 📋 Table of Contents
 
-1. [Overview & Architecture Understanding](#overview--architecture-understanding)
-2. [Prerequisites & Setup](#prerequisites--setup)
-3. [Step-by-Step Implementation Process](#step-by-step-implementation-process)
-4. [File Structure & References](#file-structure--references)
-5. [Common Issues & Solutions](#common-issues--solutions)
-6. [Testing & Validation](#testing--validation)
-7. [Best Practices](#best-practices)
+1. [Quick Start Workflow](#quick-start-workflow)
+2. [Implementation Steps](#implementation-steps)
+3. [Common Issues & Solutions](#common-issues--solutions)
+4. [Testing Guide](#testing-guide)
+5. [Best Practices](#best-practices)
 
 ---
 
-## 🏗️ Overview & Architecture Understanding
+## 🚀 Quick Start Workflow
 
-### nano-vLLM Architecture
-nano-vLLM is a trimmed-down version of the official vLLM inference engine, designed for:
-- **Simplicity**: Fewer abstractions, easier to understand
-- **Performance**: Focus on core inference functionality
-- **Compatibility**: Following vLLM patterns for numerical accuracy
-
-### Key Components
-```
-nano-vllm/
-├── nanovllm/
-│   ├── models/           # Model implementations
-│   ├── layers/           # Reusable layer components
-│   ├── engine/           # Core inference engine
-│   └── utils/            # Utilities and helpers
-```
-
-### Model Integration Points
-1. **Model Architecture** (`nanovllm/models/`)
-2. **Layer Components** (`nanovllm/layers/`)
-3. **Model Loading** (`nanovllm/engine/model_runner.py`)
-4. **Configuration** (`nanovllm/config.py`)
+1. **Study official vLLM implementation** (`serving/vllm/vllm/model_executor/models/[model_name].py`)
+2. **Copy exact architecture** to `nanovllm/models/[model_name].py`
+3. **Add model loading** to `nanovllm/engine/model_runner.py`
+4. **Add test function** to `test_models.py`
+5. **Test with real model** (if available)
 
 ---
 
-## 🔧 Prerequisites & Setup
+## 🔧 Implementation Steps
 
-### 1. Environment Setup
-```bash
-cd serving/nano-vllm
-pip install -e .
-```
-
-### 2. Required Knowledge
-- PyTorch and transformer architectures
-- Understanding of attention mechanisms
-- Familiarity with vLLM codebase structure
-- Knowledge of the target model architecture
-
-### 3. Reference Materials
-- **Official vLLM repo**: `serving/vllm/`
-- **Target model's HuggingFace implementation**
-- **Model configuration files**
-
----
-
-## 🚀 Step-by-Step Implementation Process
-
-### Step 1: Analysis Phase
-
-#### 1.1 Study the Target Model
-```bash
-# Example: Analyze model config
-python -c "
-from transformers import AutoConfig
-config = AutoConfig.from_pretrained('path/to/model')
-print('Model type:', config.model_type)
-print('Architecture:', config.architectures)
-print('Key parameters:', {k: v for k, v in config.__dict__.items() if not k.startswith('_')})
-"
-```
-
-#### 1.2 Find vLLM Reference Implementation
-**Key vLLM files to examine:**
-- `serving/vllm/vllm/model_executor/models/[model_name].py`
-- `serving/vllm/vllm/model_executor/layers/`
-- `serving/vllm/vllm/config.py` (for configuration methods)
-
-#### 1.3 Identify Required Components
-Common components for most models:
-- **Attention mechanism** (Self-attention, GQA, MQA)
-- **Feed-forward network** (MLP with activation)
-- **Normalization layers** (LayerNorm, RMSNorm)
-- **Positional encoding** (RoPE, absolute, etc.)
-- **Embedding layers**
-
-### Step 2: Layer Implementation
-
-#### 2.1 Implement Core Layers
-
-Create reusable layers in `nanovllm/layers/` if they don't exist:
-
-**Example: RoPE Implementation** (if needed)
-```python
-# File: nanovllm/layers/rotary_embedding.py
-# Reference: serving/vllm/vllm/model_executor/layers/rotary_embedding.py
-
-class NewModelRotaryEmbedding(nn.Module):
-    def __init__(self, head_size, rotary_dim, max_position_embeddings, base, rope_scaling=None):
-        # Copy exact vLLM implementation
-        super().__init__()
-        # ... exact vLLM code
-```
-
-**Key principles:**
-- **Copy exact vLLM implementation** for numerical accuracy
-- Use existing nano-vLLM layers when possible
-- Add new layers only when necessary
-
-#### 2.2 Update Existing Layers
-
-If existing layers need modification (like we did with rotary embedding):
-
-```python
-# Example: Adding new rope scaling types
-def get_rope(head_size, rotary_dim, max_position_embeddings, base, rope_scaling, is_neox_style=True):
-    if rope_scaling is None:
-        return RotaryEmbedding(head_size, rotary_dim, max_position_embeddings, base, is_neox_style)
-    
-    # Add new scaling types
-    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
-    if rope_type == "llama3":
-        return Llama3RotaryEmbedding(head_size, rotary_dim, max_position_embeddings, base, rope_scaling, is_neox_style)
-    # ... other types
-```
-
-### Step 3: Model Architecture Implementation
-
-#### 3.1 Create Model File
+### Step 1: Create Model File
 
 **File**: `nanovllm/models/[model_name].py`  
 **Reference**: `serving/vllm/vllm/model_executor/models/[model_name].py`
 
-**Template Structure:**
+**Template Structure**:
 ```python
-# File: nanovllm/models/llama.py
 import torch
-import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
-from transformers import LlamaConfig
+from torch import nn
+import torch.distributed as dist
+from transformers import ModelConfig
 
-from ..layers.activation import SiluAndMul
-from ..layers.attention import PagedAttention
-from ..layers.layernorm import RMSNorm
-from ..layers.linear import (
-    LinearMethodBase, 
-    MergedColumnParallelLinear,
-    QKVParallelLinear, 
-    RowParallelLinear
-)
-from ..layers.rotary_embedding import get_rope
-from ..layers.sampler import Sampler
-from ..utils.weight_utils import (
-    convert_pyslice_to_tensor,
-    default_weight_loader,
-    hf_model_weights_iterator
-)
+from nanovllm.layers.activation import SiluAndMul
+from nanovllm.layers.attention import Attention
+from nanovllm.layers.layernorm import RMSNorm
+from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.rotary_embedding import get_rope
+from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
-class ModelNameAttention(nn.Module):
-    """Copy exact implementation from vLLM"""
-    def __init__(self, config, linear_method=None):
-        # Exact vLLM implementation
-        pass
-
-class ModelNameMLP(nn.Module):
-    """Copy exact implementation from vLLM"""
+class ModelAttention(nn.Module):
+    # Copy exact vLLM implementation
     pass
 
-class ModelNameDecoderLayer(nn.Module):
-    """Copy exact implementation from vLLM"""
+class ModelMLP(nn.Module):
+    # Copy exact vLLM implementation
+    pass
+
+class ModelDecoderLayer(nn.Module):
+    # Copy exact vLLM implementation
     pass
 
 class ModelNameModel(nn.Module):
-    """Copy exact implementation from vLLM"""
+    # Copy exact vLLM implementation
     pass
 
-class ModelNameForCausalLM(nn.Module):
-    """Main model class"""
-    pass
+class ModelForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.model = ModelNameModel(config)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        if config.tie_word_embeddings:
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data
+
+    def forward(self, input_ids, positions):
+        return self.model(input_ids, positions)
+
+    def compute_logits(self, hidden_states):
+        return self.lm_head(hidden_states)
 ```
 
-### Step 4: Model Loading Integration
-
-#### 4.1 Update Model Runner
+### Step 2: Add Model Loading
 
 **File**: `nanovllm/engine/model_runner.py`
 
 ```python
-def load_model(self):
-    config = self.config
-    hf_config = config.hf_config
-    
-    # Add new model type detection
-    if hf_config.model_type == "llama":
-        from ..models.llama import LlamaForCausalLM
-        model = LlamaForCausalLM(hf_config)
-    elif hf_config.model_type == "qwen3":
-        from ..models.qwen3 import Qwen3ForCausalLM  
-        model = Qwen3ForCausalLM(hf_config)
-    else:
-        raise ValueError(f"Unsupported model type: {hf_config.model_type}")
-    
-    model.load_weights(config.model_path)
-    return model.cuda().eval()
+# Add import
+from nanovllm.models.newmodel import NewModelForCausalLM
+
+# Update model selection
+if hf_config.model_type == "newmodel":
+    self.model = NewModelForCausalLM(hf_config)
+elif hf_config.model_type == "qwen3":
+    self.model = Qwen3ForCausalLM(hf_config)
+# ... other models
+
+# Update error message
+else:
+    raise ValueError(f"Unsupported model type: {hf_config.model_type}. "
+                   "Supported types: qwen3, qwen2, llama, newmodel")
 ```
-
-#### 4.2 Update Cache Allocation
-
-Implement vLLM-compatible cache calculation:
-
-```python
-class NanoVLLMModelConfig:
-    """Helper class that implements vLLM's ModelConfig methods for cache calculation."""
-    
-    def __init__(self, hf_config, tensor_parallel_size=1):
-        self.hf_config = hf_config
-        self.tensor_parallel_size = tensor_parallel_size
-    
-    def get_head_size(self) -> int:
-        """Get head size following exact vLLM implementation."""
-        if getattr(self.hf_config, "head_dim", None) is not None:
-            return self.hf_config.head_dim
-        return (self.hf_config.hidden_size // self.hf_config.num_attention_heads)
-    
-    def get_total_num_kv_heads(self) -> int:
-        """Returns the total number of KV heads following exact vLLM implementation."""
-        attributes = ["n_head_kv", "num_kv_heads", "num_key_value_heads", "multi_query_group_num"]
-        for attr in attributes:
-            num_kv_heads = getattr(self.hf_config, attr, None)
-            if num_kv_heads is not None:
-                return num_kv_heads
-        return self.hf_config.num_attention_heads
-```
-
----
-
-## 📁 File Structure & References
-
-### Files You Need to Create/Modify
-
-| File Path | Purpose | vLLM Reference |
-|-----------|---------|----------------|
-| `nanovllm/models/[model].py` | Main model implementation | `vllm/model_executor/models/[model].py` |
-| `nanovllm/engine/model_runner.py` | Model loading and cache allocation | `vllm/worker/cache_engine.py`, `vllm/config.py` |
-| `nanovllm/layers/rotary_embedding.py` | RoPE implementation (if needed) | `vllm/model_executor/layers/rotary_embedding.py` |
-| `nanovllm/layers/attention.py` | Attention mechanisms (if needed) | `vllm/attention/` |
-
-### Key vLLM Reference Files
-
-1. **Model Implementation**: 
-   - `serving/vllm/vllm/model_executor/models/llama.py`
-   - `serving/vllm/vllm/model_executor/models/qwen.py`
-
-2. **Layer Components**:
-   - `serving/vllm/vllm/model_executor/layers/rotary_embedding.py`
-   - `serving/vllm/vllm/model_executor/layers/attention.py`
-   - `serving/vllm/vllm/model_executor/layers/activation.py`
-   - `serving/vllm/vllm/model_executor/layers/linear.py`
-
-3. **Configuration**:
-   - `serving/vllm/vllm/config.py` (lines 1127-1225 for cache calculations)
-   - `serving/vllm/vllm/worker/cache_engine.py`
 
 ---
 
 ## ⚠️ Common Issues & Solutions
 
-### Issue 1: RoPE Scaling Assertion Error
+### Issue 1: tie_word_embeddings Runtime Error
+**Error**: `Expected tensor for argument #1 'indices' to have one of the following scalar types: Long, Int; but got CUDABFloat16Type instead`
+
+**Root Cause**: Incorrect implementation assigning embedding layer to lm_head
+```python
+# WRONG - Makes lm_head an embedding layer expecting int indices
+if config.tie_word_embeddings:
+    self.lm_head = self.model.embed_tokens
+```
+
+**Solution**: Always create `ParallelLMHead` and share weights properly
+```python
+# CORRECT - Always create ParallelLMHead, then share weights
+self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+if config.tie_word_embeddings:
+    self.lm_head.weight.data = self.model.embed_tokens.weight.data
+```
+
+### Issue 2: RoPE Scaling Assertion Error
 **Error**: `AssertionError` in `rotary_embedding.py`
 ```python
 assert rope_scaling is None
@@ -280,68 +134,92 @@ assert rope_scaling is None
 
 **Solution**: Implement full RoPE scaling support following vLLM patterns
 
-### Issue 2: KV Cache Allocation Failure
+### Issue 3: KV Cache Allocation Failure
 **Error**: `AssertionError: config.num_kvcache_blocks > 0`
 
 **Solution**: Implement vLLM-compatible cache calculation with proper head dimension handling
 
-### Issue 3: Weight Loading Mismatches
-**Error**: Shape mismatches during weight loading
+### Issue 4: Model Architecture Differences
+**Problem**: Subtle differences between model generations (e.g., Qwen2 vs Qwen3)
 
-**Solution**: Implement proper parameter mapping for merged weights (QKV, gate_up, etc.)
+**Key Differences Found**:
+- **Q/K Normalization**: Qwen2 has NO q_norm/k_norm layers, Qwen3 has RMSNorm
+- **QKV Bias**: Qwen2 always uses `bias=True`, Qwen3 uses configurable bias
+- **Tensor Parallel Logic**: Different KV head distribution patterns
+
+**Solution**: Carefully compare official vLLM implementations line by line
 
 ---
 
-## 🧪 Testing & Validation
+## 🧪 Testing Guide
 
-### Test Script Template
+### Add Test to test_models.py
+
 ```python
-# test_new_model.py
-from nanovllm import LLM
+def test_newmodel_model():
+    """Test function to verify NewModel loading and inference"""
+    model_path = os.path.expanduser("pretrained/NewModel-1B-Instruct")
+    
+    if not os.path.exists(model_path):
+        print(f"Skipping NewModel test - model path {model_path} does not exist.")
+        return True
+    
+    try:
+        config = AutoConfig.from_pretrained(model_path)
+        if config.model_type != "newmodel":
+            print(f"Error: Model at {model_path} is not a NewModel (type: {config.model_type})")
+            return False
+        
+        print(f"Loading NewModel from: {model_path}")
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        llm = LLM(model_path, enforce_eager=False, tensor_parallel_size=1)
+        
+        sampling_params = SamplingParams(temperature=0.6, max_tokens=50)
+        prompts = ["Hello, how are you?"]
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+        outputs = llm.generate(prompts, sampling_params)
+        
+        print(f"NewModel result: {outputs[0]['text']!r}")
+        llm.exit()
+        del llm
+        gc.collect()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error during NewModel test: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-def test_new_model():
-    print("Testing new model...")
-    
-    # Test model loading
-    llm = LLM('path/to/model', enforce_eager=True, tensor_parallel_size=1)
-    
-    # Test inference
-    prompts = ["Hello, how are you?", "What is AI?"]
-    results = llm.generate(prompts, max_tokens=50)
-    
-    for prompt, result in zip(prompts, results):
-        print(f"Prompt: {prompt}")
-        print(f"Result: {result.outputs[0].text}")
-
-if __name__ == "__main__":
-    test_new_model()
+# Update main() function
+def main():
+    newmodel_success = test_newmodel_model()
+    print(f"NewModel test: {'✅ PASSED' if newmodel_success else '❌ FAILED'}")
 ```
 
-### Validation Checklist
-
-- [ ] **Model loads without errors**
-- [ ] **KV cache allocation succeeds**
-- [ ] **Weight loading completes**
-- [ ] **Forward pass works**
-- [ ] **Text generation produces coherent output**
-- [ ] **Existing models still work (backward compatibility)**
+### Run Tests
+```bash
+cd serving/nano-vllm
+python test_models.py
+```
 
 ---
 
 ## 🎯 Best Practices
 
-### 1. Follow vLLM Patterns Exactly
-- **Copy implementations directly** from vLLM for numerical accuracy
+### 1. Implementation Principles
+- **Copy exact vLLM implementations** for numerical accuracy
 - **Don't simplify or optimize** unless absolutely necessary
-- **Maintain exact parameter names** and shapes
+- **Follow existing nano-vLLM patterns** exactly
 
-### 2. Incremental Development
-1. Start with basic model structure
-2. Add layer by layer
-3. Test each component separately
-4. Integrate gradually
-
-### 3. Error Handling
+### 2. Error Handling
 ```python
 # Add helpful error messages
 def __init__(self, config):
@@ -353,24 +231,32 @@ def __init__(self, config):
         f"hidden_size must be divisible by num_attention_heads"
 ```
 
+### 3. Key Implementation Insights
+1. **Architecture Precision Matters**: Even small differences like normalization layers can completely change model behavior
+2. **tie_word_embeddings is Tricky**: Always use the pattern of creating separate layers and copying weights
+3. **Follow Existing Patterns**: nano-vLLM has established patterns that work - follow them exactly, while the implementation is exactly official vllm
+
+### 4. Model-Specific Considerations
+- **Attention mechanisms**: Different models have vastly different attention implementations
+- **Normalization**: LayerNorm vs RMSNorm, pre vs post, Q/K normalization variations  
+- **Bias usage**: Some models use bias everywhere, others nowhere, others selectively
+- **RoPE configurations**: Different theta values, scaling methods, partial rotation
+- **KV head configurations**: GQA, MQA, standard attention variations
+
 ---
 
 ## 🎉 Summary
 
-The key to successfully adding new models to nano-vLLM is:
+Successfully implemented models:
+- **Llama**: Full architecture with advanced RoPE scaling and GQA
+- **Qwen2**: Correct attention without Q/K normalization, fixed tie_word_embeddings
+- **Qwen3**: Original implementation with Q/K normalization
 
-1. **Study the official vLLM implementation carefully**
-2. **Copy exact implementations for numerical accuracy**
-3. **Test incrementally at each step**
-4. **Handle edge cases and configuration variations**
-5. **Maintain backward compatibility**
+**Key Success Factors**:
+1. Study official vLLM implementation carefully
+2. Copy exact implementations for numerical accuracy
+3. Use test_models.py for comprehensive testing
+4. Debug tie_word_embeddings carefully
+5. Maintain backward compatibility
 
-This process was successfully demonstrated with the Llama implementation, which now supports:
-- ✅ Full Llama architecture (Attention, MLP, Decoder layers)
-- ✅ Advanced RoPE scaling (llama3, linear, ntk, dynamic)
-- ✅ Grouped Query Attention (GQA)
-- ✅ Proper KV cache allocation
-- ✅ Weight loading with parameter mapping
-- ✅ Backward compatibility with existing Qwen3 models
-
-Following this guide ensures that new model implementations maintain the quality, performance, and compatibility standards of nano-vLLM. 
+Following this guide ensures new model implementations maintain the quality, performance, and compatibility standards of nano-vLLM while avoiding common pitfalls discovered during real implementations. 
