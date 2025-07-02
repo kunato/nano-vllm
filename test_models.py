@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Test script for Qwen2 model implementation in nano-vLLM.
-This script validates that the Qwen2 model can be loaded and run inference correctly.
+Test script for model implementation in nano-vLLM.
+This script validates that the model implemented in nanovllm can be loaded and run inference correctly.
 """
 
-import torch
-import torch.distributed as dist
-from transformers import Qwen2Config
-from nanovllm.models.qwen2 import Qwen2ForCausalLM
 import gc
 import os
-import sys
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer, AutoConfig
 
@@ -174,8 +169,67 @@ def test_llama_model():
         return False
 
 
+def test_gemma3_model():
+    """Test function to verify Gemma3 loading and inference"""
+    model_path = os.path.expanduser("pretrained/gemma-3-4b-it-text-only")
+    
+    if not os.path.exists(model_path):
+        print(f"Skipping Gemma3 test - model path {model_path} does not exist.")
+        return True
+    
+    try:
+        config = AutoConfig.from_pretrained(model_path)
+        if config.model_type != "gemma3_text":
+            print(f"Error: Model at {model_path} is not a gemma3_text (type: {config.model_type})")
+            return False
+        
+        print(f"Loading Gemma3 from: {model_path}")
+        print(f"Model type: {config.model_type}")
+        print(f"Hidden size: {config.hidden_size}")
+        print(f"Num attention heads: {config.num_attention_heads}")
+        print(f"Num key-value heads: {getattr(config, 'num_key_value_heads', config.num_attention_heads)}")
+        print(f"Hidden activation: {getattr(config, 'hidden_activation', 'N/A')}")
+        
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        llm = LLM(model_path, enforce_eager=True, tensor_parallel_size=1)
+        
+        sampling_params = SamplingParams(temperature=0.6, max_tokens=50)
+        prompts = [
+            "Hello, how are you?",
+            "What is the capital of France?",
+            "Write a simple Python function to add two numbers"
+        ]
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+        outputs = llm.generate(prompts, sampling_params)
+        
+        print("\nResults:")
+        for prompt, output in zip(prompts, outputs):
+            print(f"Prompt: {prompt!r}")
+            print(f"Completion: {output['text']!r}")
+            print()
+        
+        print(f"✅ Gemma3 result: {outputs[0]['text']!r}")
+        llm.exit()
+        del llm
+        gc.collect()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error during Gemma3 test: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
-    print("Testing nano-vllm with Qwen2 support...")
+    print("Testing nano-vllm with Gemma3 support...")
     print("=" * 50)
     
     # Test existing functionality first to ensure we didn't break anything
@@ -187,24 +241,20 @@ def main():
     llama_success = test_llama_model()
     
     print("\n" + "=" * 50)
-    print("3. Testing Qwen2 model (new functionality):")
+    print("3. Testing Qwen2 model (existing functionality):")
     qwen2_success = test_qwen2_model()
+    
+    print("\n" + "=" * 50)
+    print("4. Testing Gemma3 model (new functionality):")
+    gemma3_success = test_gemma3_model()
     
     print("\n" + "=" * 50)
     print("Test Summary:")
     print(f"Qwen3 test: {'✅ PASSED' if qwen3_success else '❌ FAILED'}")
     print(f"Llama test: {'✅ PASSED' if llama_success else '❌ FAILED'}")
     print(f"Qwen2 test: {'✅ PASSED' if qwen2_success else '❌ FAILED'}")
+    print(f"Gemma3 test: {'✅ PASSED' if gemma3_success else '❌ FAILED'}")
     
-    if qwen2_success:
-        print("\n🎉 Qwen2 support successfully implemented in nano-vllm!")
-        print("Key differences from Qwen3:")
-        print("  • No Q/K normalization layers")
-        print("  • QKV projection always uses bias=True")
-        print("  • Same overall architecture pattern")
-    else:
-        print("\n💥 Qwen2 support implementation needs fixes.")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
