@@ -43,7 +43,7 @@ class LLMEngine:
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
-            prompt = self.tokenizer.encode(prompt)
+            prompt = self.tokenizer.encode(prompt, add_special_tokens=not sampling_params.completion_only)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
 

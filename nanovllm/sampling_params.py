@@ -11,6 +11,7 @@ class SamplingParams:
     top_p: float = 1.0
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
+    completion_only: bool = False
     
     def __post_init__(self):
         """Validate parameters after initialization."""
