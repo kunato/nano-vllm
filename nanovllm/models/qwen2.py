@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-import torch.distributed as dist
+import nanovllm.utils.distributed as dist
 from transformers import Qwen2Config
 
 from nanovllm.layers.activation import SiluAndMul

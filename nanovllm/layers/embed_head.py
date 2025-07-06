@@ -1,8 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torch.distributed as dist
-
+import nanovllm.utils.distributed as dist
 from nanovllm.utils.context import get_context
 
 

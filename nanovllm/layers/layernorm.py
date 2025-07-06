@@ -19,7 +19,6 @@ class RMSNorm(nn.Module):
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
-        self._is_compiled = False
 
     @staticmethod
     def forward_static(
@@ -28,7 +27,6 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """Static forward implementation that can be compiled safely."""
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
@@ -58,15 +56,6 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """CUDA implementation with conditional compilation."""
-        # Apply torch.compile conditionally like vLLM's GemmaRMSNorm
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        # Compile the static method only once
-        if not self._is_compiled:
-            self.forward_static = torch.compile(self.forward_static)
-            self._is_compiled = True
-        
         return self.forward_native(x, residual)
 
     def forward(
@@ -103,7 +92,6 @@ class GemmaRMSNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
-        self._is_compiled = False
 
     @staticmethod
     def forward_static(
@@ -143,12 +131,6 @@ class GemmaRMSNorm(nn.Module):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
-
-        if not self._is_compiled:
-            self.forward_static = torch.compile(self.forward_static)
-            self._is_compiled = True
         return self.forward_native(x, residual)
 
     def forward(
