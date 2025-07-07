@@ -46,7 +46,7 @@ class ReplicatedLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        param.data = loaded_weight
+        param.data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)
@@ -77,7 +77,7 @@ class ColumnParallelLinear(LinearBase):
         # This avoids creating any copies and only keeps the original tensor in memory
         shard_size = param.data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size
-        param.data = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
+        param.data = loaded_weight.narrow(self.tp_dim, start_idx, shard_size).clone()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)
@@ -174,7 +174,7 @@ class RowParallelLinear(LinearBase):
         # This avoids creating any copies and only keeps the original tensor in memory
         shard_size = param.data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size
-        param.data = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
+        param.data.copy_(loaded_weight.narrow(self.tp_dim, start_idx, shard_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
